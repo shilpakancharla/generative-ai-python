@@ -28,6 +28,7 @@ from google.generativeai import models
 from google.generativeai.types import safety_types
 from google.generativeai.types import content_types
 from google.generativeai.types import answer_types
+from google.generativeai.types import retriever_types
 
 DEFAULT_ANSWER_MODEL = "models/aqa"
 
@@ -106,12 +107,20 @@ def _make_grounding_passages(source: GroundingPassagesOptions) -> glm.GroundingP
 
     return glm.GroundingPassages(passages=passages)
 
+@string_utils.prettyprint
+@dataclasses.dataclass
+class SemanticRetriever:
+    source: str
+    query: content_types.ContentType
+    metadata_filters: retriever_types.MetadataFilters | None
+    max_chunks_count: int | None
+    minimum_relevance_score: float | None
 
 def _make_generate_answer_request(
     *,
     model: model_types.AnyModelNameOptions = DEFAULT_ANSWER_MODEL,
     contents: content_types.ContentsType,
-    grounding_source: GroundingPassagesOptions,
+    grounding_source: GroundingPassagesOptions | SemanticRetriever,
     answer_style: AnswerStyle | None = None,
     safety_settings: safety_types.SafetySettingOptions | None = None,
     temperature: float | None = None,
@@ -141,7 +150,8 @@ def _make_generate_answer_request(
             safety_settings, harm_category_set="new"
         )
 
-    grounding_source = _make_grounding_passages(grounding_source)
+    if not isinstance(grounding_source, SemanticRetriever):
+        grounding_source = _make_grounding_passages(grounding_source)
 
     if answer_style:
         answer_style = to_answer_style(answer_style)

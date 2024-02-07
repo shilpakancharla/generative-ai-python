@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-from typing import Any, Dict, List, TypedDict, Optional, Union
+from typing import Any, Dict, List, TypedDict, Optional, Union, Iterable
 
 import google.ai.generativelanguage as glm
 
@@ -24,6 +24,7 @@ from google.generativeai import string_utils
 from google.generativeai.types import safety_types
 from google.generativeai.types import citation_types
 from google.generativeai.types import content_types
+from google.generativeai.types import retriever_types
 
 __all__ = ["Answer"]
 
@@ -63,3 +64,17 @@ def to_finish_reason(x: FinishReasonOptions) -> FinishReason:
     if isinstance(x, str):
         x = x.lower()
     return _FINISH_REASONS[x]
+
+@string_utils.prettyprint
+@dataclasses.dataclass
+class MetadataFilters:
+    key: str
+    conditions: Iterable[Condition]
+
+
+@string_utils.prettyprint
+@dataclasses.dataclass
+class Condition:
+    string_value: Optional[str] = None
+    numeric_value: Optional[float] = None
+    operation: retriever_types.Operator

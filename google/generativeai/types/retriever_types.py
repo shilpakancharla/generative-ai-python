@@ -32,12 +32,16 @@ from google.generativeai.types import citation_types
 from google.generativeai.types.model_types import idecode_time
 from google.generativeai.utils import flatten_update_paths
 
+_VALID_NAME = r"[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])$"
+NAME_ERROR_MSG = """The `name` must consist of alphanumeric characters (or -) and be 40 or fewer characters. The name you entered:
+\tlen(name)== {length}
+\tname={name}
+"""
 
-_DOCUMENT_NAME_REGEX = re.compile(r"^corpora/[a-z0-9-]+/documents/[a-z0-9-]+$")
-_CHUNK_NAME_REGEX = re.compile(r"^corpora/([^/]+?)(/documents/([^/]+?)(/chunks/([^/]+?))?)?$")
-_REMOVE = string.punctuation
-_REMOVE = _REMOVE.replace("-", "")  # Don't remove hyphens
-_PATTERN = r"[{}]".format(_REMOVE)  # Create the pattern
+
+def valid_name(name):
+    return re.match(_VALID_NAME, name) and len(name) < 40
+
 
 Operator = glm.Condition.Operator
 State = glm.Chunk.State
@@ -45,14 +49,20 @@ State = glm.Chunk.State
 OperatorOptions = Union[str, int, Operator]
 StateOptions = Union[str, int, State]
 
-CreateChunkOptions = Union[Mapping[str, str], tuple[str, str]]
+ChunkOptions = Union[
+    glm.Chunk,
+    str,
+    tuple[str, str],
+    tuple[str, str, Any],
+    Mapping[str, Any],
+]  # fmt: no
 
 BatchCreateChunkOptions = Union[
     glm.BatchCreateChunksRequest,
-    list[glm.CreateChunkRequest],
-    Iterable[str],
-    Iterable[CreateChunkOptions],
-]
+    Mapping[str, str],
+    Mapping[str, tuple[str, str]],
+    Iterable[ChunkOptions],
+]  # fmt: no
 
 UpdateChunkOptions = Union[glm.UpdateChunkRequest, Mapping[str, Any], tuple[str, Any]]
 
@@ -131,20 +141,6 @@ def to_state(x: StateOptions) -> State:
         x = x.lower()
     return _STATE[x]
 
-
-@string_utils.prettyprint
-@dataclasses.dataclass
-class MetadataFilters:
-    key: str
-    conditions: Condition
-
-
-@string_utils.prettyprint
-@dataclasses.dataclass
-class Condition:
-    value: str | float
-
-
 @string_utils.prettyprint
 @dataclasses.dataclass
 class CustomMetadata:
@@ -174,7 +170,7 @@ class Corpus:
 
     def create_document(
         self,
-        name: Optional[str] = None,
+        name: str,
         display_name: Optional[str] = None,
         custom_metadata: Optional[list[CustomMetadata]] = None,
         client: glm.RetrieverServiceClient | None = None,
@@ -197,24 +193,14 @@ class Corpus:
         if client is None:
             client = get_default_retriever_client()
 
-        if not name and not display_name:
-            raise ValueError("Either the document name or display name must be specified.")
-
         document = None
-        if name:
-            if re.match(_DOCUMENT_NAME_REGEX, name):
-                document = glm.Document(
-                    name=name, display_name=display_name, custom_metadata=custom_metadata
-                )
-            elif f"corpora/{self.name}/documents/" not in name:
-                document_name = f"{self.name}/documents/" + re.sub(_PATTERN, "", name)
-                document = glm.Document(
-                    name=document_name, display_name=display_name, custom_metadata=custom_metadata
-                )
-            else:
-                raise ValueError(
-                    f"Document name must be formatted as {self.name}/document/<document_name>."
-                )
+        if valid_name(name):
+            document_name = f"{self.name}/documents/{name}"
+            document = glm.Document(
+                name=document_name, display_name=display_name, custom_metadata=custom_metadata
+            )
+        else:
+            raise ValueError(NAME_ERROR_MSG.format(length=len(name), name=name))
 
         request = glm.CreateDocumentRequest(parent=self.name, document=document)
         response = client.create_document(request)
@@ -222,7 +208,7 @@ class Corpus:
 
     async def create_document_async(
         self,
-        name: Optional[str] = None,
+        name: str,
         display_name: Optional[str] = None,
         custom_metadata: Optional[list[CustomMetadata]] = None,
         client: glm.RetrieverServiceAsyncClient | None = None,
@@ -231,24 +217,14 @@ class Corpus:
         if client is None:
             client = get_default_retriever_async_client()
 
-        if not name and not display_name:
-            raise ValueError("Either the document name or display name must be specified.")
-
         document = None
-        if name:
-            if re.match(_DOCUMENT_NAME_REGEX, name):
-                document = glm.Document(
-                    name=name, display_name=display_name, custom_metadata=custom_metadata
-                )
-            elif f"corpora/{self.name}/documents/" not in name:
-                document_name = f"{self.name}/documents/" + re.sub(_PATTERN, "", name)
-                document = glm.Document(
-                    name=document_name, display_name=display_name, custom_metadata=custom_metadata
-                )
-            else:
-                raise ValueError(
-                    f"Document name must be formatted as {self.name}/document/<document_name>."
-                )
+        if valid_name(name):
+            document_name = f"{self.name}/documents/{name}"
+            document = glm.Document(
+                name=document_name, display_name=display_name, custom_metadata=custom_metadata
+            )
+        else:
+            raise ValueError(NAME_ERROR_MSG.format(length=len(name), name=name))
 
         request = glm.CreateDocumentRequest(parent=self.name, document=document)
         response = await client.create_document(request)
@@ -350,7 +326,7 @@ class Corpus:
         metadata_filters: Optional[list[str]] = None,
         results_count: Optional[int] = None,
         client: glm.RetrieverServiceClient | None = None,
-    ):
+    ) -> Iterable[RelevantChunk]:
         """
         Query a corpus for information.
 
@@ -378,7 +354,15 @@ class Corpus:
         response = client.query_corpus(request)
         response = type(response).to_dict(response)
 
-        return response
+        # Create a RelevantChunk object for each chunk listed in response['relevant_chunks']
+        relevant_chunks = []
+        for c in response["relevant_chunks"]:
+            rc = RelevantChunk(
+                chunk_relevance_score=c["chunk_relevance_score"], chunk=Chunk(**c["chunk"])
+            )
+            relevant_chunks.append(rc)
+
+        return relevant_chunks
 
     async def query_async(
         self,
@@ -386,7 +370,7 @@ class Corpus:
         metadata_filters: Optional[list[str]] = None,
         results_count: Optional[int] = None,
         client: glm.RetrieverServiceAsyncClient | None = None,
-    ):
+    ) -> Iterable[RelevantChunk]:
         """This is the async version of `Corpus.query`."""
         if client is None:
             client = get_default_retriever_async_client()
@@ -404,12 +388,20 @@ class Corpus:
         response = await client.query_corpus(request)
         response = type(response).to_dict(response)
 
-        return response
+        # Create a RelevantChunk object for each chunk listed in response['relevant_chunks']
+        relevant_chunks = []
+        for c in response["relevant_chunks"]:
+            rc = RelevantChunk(
+                chunk_relevance_score=c["chunk_relevance_score"], chunk=Chunk(**c["chunk"])
+            )
+            relevant_chunks.append(rc)
+
+        return relevant_chunks
 
     def delete_document(
         self,
         name: str,
-        force: Optional[bool] = None,
+        force: bool = False,
         client: glm.RetrieverServiceClient | None = None,
     ):
         """
@@ -428,7 +420,7 @@ class Corpus:
     async def delete_document_async(
         self,
         name: str,
-        force: Optional[bool] = None,
+        force: bool = False,
         client: glm.RetrieverServiceAsyncClient | None = None,
     ):
         """This is the async version of `Corpus.delete_document`."""
@@ -506,8 +498,8 @@ class Document(abc.ABC):
 
     def create_chunk(
         self,
-        name: Optional[str],
         data: str | ChunkData,
+        name: Optional[str] = None,
         custom_metadata: Optional[list[CustomMetadata]] = None,
         client: glm.RetrieverServiceClient | None = None,
     ) -> Chunk:
@@ -515,8 +507,8 @@ class Document(abc.ABC):
         Create a `Chunk` object which has textual data.
 
         Args:
-            name: The `Chunk` resource name. The ID (name excluding the "corpora/*/documents/*/chunks/" prefix) can contain up to 40 characters that are lowercase alphanumeric or dashes (-).
             data: The content for the `Chunk`, such as the text string.
+            name: The `Chunk` resource name. The ID (name excluding the "corpora/*/documents/*/chunks/" prefix) can contain up to 40 characters that are lowercase alphanumeric or dashes (-).
             custom_metadata: User provided custom metadata stored as key-value pairs.
             state: States for the lifecycle of a `Chunk`.
 
@@ -529,17 +521,13 @@ class Document(abc.ABC):
         if client is None:
             client = get_default_retriever_client()
 
-        chunk_name, chunk = "", None
-        if name:
-            if re.match(_CHUNK_NAME_REGEX, name):
-                chunk_name = name
-
-            elif "chunks/" not in name:
-                chunk_name = f"{self.name}/chunks/" + re.sub(_PATTERN, "", name)
-            else:
-                raise ValueError(
-                    f"Chunk name must be formatted as {self.name}/chunks/<chunk_name>."
-                )
+        chunk_name, chunk = None, None
+        if name is None:
+            chunk_name = None
+        elif valid_name(name):
+            chunk_name = f"{self.name}/chunks/{name}"
+        else:
+            raise ValueError(NAME_ERROR_MSG.format(length=len(name), name=name))
 
         if isinstance(data, str):
             chunk = glm.Chunk(
@@ -558,8 +546,8 @@ class Document(abc.ABC):
 
     async def create_chunk_async(
         self,
-        name: Optional[str],
         data: str | ChunkData,
+        name: Optional[str] = None,
         custom_metadata: Optional[list[CustomMetadata]] = None,
         client: glm.RetrieverServiceAsyncClient | None = None,
     ) -> Chunk:
@@ -567,17 +555,13 @@ class Document(abc.ABC):
         if client is None:
             client = get_default_retriever_async_client()
 
-        chunk_name, chunk = "", None
-        if name:
-            if re.match(_CHUNK_NAME_REGEX, name):
-                chunk_name = name
-
-            elif "chunks/" not in name:
-                chunk_name = f"{self.name}/chunks/" + re.sub(_PATTERN, "", name)
-            else:
-                raise ValueError(
-                    f"Chunk name must be formatted as {self.name}/chunks/<chunk_name>."
-                )
+        chunk_name, chunk = None, None
+        if name is None:
+            chunk_name = None
+        elif valid_name(name):
+            chunk_name = f"{self.name}/chunks/{name}"
+        else:
+            raise ValueError(NAME_ERROR_MSG.format(length=len(name), name=name))
 
         if isinstance(data, str):
             chunk = glm.Chunk(
@@ -593,6 +577,63 @@ class Document(abc.ABC):
         request = glm.CreateChunkRequest(parent=self.name, chunk=chunk)
         response = await client.create_chunk(request)
         return decode_chunk(response)
+
+    def _make_chunk(self, chunk: ChunkOptions) -> glm.Chunk:
+        del self
+        if isinstance(chunk, glm.Chunk):
+            return chunk
+        elif isinstance(chunk, str):
+            return glm.Chunk(data={"string_value": chunk})
+        elif isinstance(chunk, tuple):
+            if len(chunk) == 2:
+                name, data = chunk  # pytype: disable=bad-unpacking
+                custom_metadata = None
+            elif len(chunk) == 3:
+                name, data, custom_metadata = chunk  # pytype: disable=bad-unpacking
+            else:
+                raise ValueError(
+                    f"Tuples should have length 2 or 3, got length: {len(chunk)}\n"
+                    f"value: {chunk}"
+                )
+
+            return glm.Chunk(
+                name=name,
+                data={"string_value": data},
+                custom_metadata=custom_metadata,
+            )
+        elif isinstance(chunk, Mapping):
+            if isinstance(chunk["data"], str):
+                chunk = dict(chunk)
+                chunk["data"] = {"string_value": chunk["data"]}
+            return glm.Chunk(chunk)
+        else:
+            raise TypeError(
+                f"Could not convert instance of `{type(chunk)}` chunk:" f"value: {chunk}"
+            )
+
+    def _make_batch_create_chunk_request(
+        self, chunks: BatchCreateChunkOptions
+    ) -> glm.BatchCreateChunksRequest:
+        if isinstance(chunks, glm.BatchCreateChunksRequest):
+            return chunks
+
+        if isinstance(chunks, Mapping):
+            chunks = chunks.items()
+            chunks = (
+                # Flatten tuples
+                (key,) + value if isinstance(value, tuple) else (key, value)
+                for key, value in chunks
+            )
+
+        requests = []
+        for i, chunk in enumerate(chunks):
+            chunk = self._make_chunk(chunk)
+            if chunk.name == "":
+                chunk.name = str(i)
+
+            requests.append(glm.CreateChunkRequest(parent=self.name, chunk=chunk))
+
+        return glm.BatchCreateChunksRequest(parent=self.name, requests=requests)
 
     def batch_create_chunks(
         self,
@@ -611,63 +652,7 @@ class Document(abc.ABC):
         if client is None:
             client = get_default_retriever_client()
 
-        if isinstance(chunks, glm.BatchCreateChunksRequest):
-            response = client.batch_create_chunks(chunks)
-            response = type(response).to_dict(response)
-            return response
-
-        _requests = []
-        name, data, custom_metadata = None, None, None
-        if isinstance(chunks, Iterable):
-            for chunk in chunks:
-                if isinstance(chunk, glm.CreateChunkRequest):
-                    _requests.append(chunk)
-                elif isinstance(chunk, str):
-                    c = glm.CreateChunkRequest(
-                        parent=self.name, chunk=glm.Chunk(data={"string_value": chunk})
-                    )
-                    _requests.append(c)
-                elif isinstance(chunk, Mapping):
-                    for key, value in chunk.items():
-                        if re.match(_CHUNK_NAME_REGEX, value):
-                            name = value
-                        elif isinstance(value, str):
-                            data = chunk[key]
-                        elif isinstance(value, Iterable):
-                            custom_metadata = value
-                        c = glm.CreateChunkRequest(  # Create a glm.CreateChunkRequest
-                            parent=self.name,
-                            chunk=glm.Chunk(
-                                name=name,
-                                data={"string_value": data},
-                                custom_metadata=custom_metadata,
-                            ),
-                        )
-                        _requests.append(c)
-                elif isinstance(chunk, tuple):
-                    for item in chunk:
-                        if re.match(_CHUNK_NAME_REGEX, item):
-                            name = item
-                        elif isinstance(item, str):
-                            data = item
-                        elif isinstance(item, Iterable):
-                            custom_metadata = item
-                        c = glm.CreateChunkRequest(  # Create a glm.CreateChunkRequest
-                            parent=self.name,
-                            chunk=glm.Chunk(
-                                name=name,
-                                data={"string_value": data},
-                                custom_metadata=custom_metadata,
-                            ),
-                        )
-
-                else:
-                    raise TypeError(
-                        "Batched chunk requests must be in the format of a dictionary or tuple,"
-                        "with the name as the key and the data as the value."
-                    )
-
-        request = glm.BatchCreateChunksRequest(parent=self.name, requests=_requests)
+        request = self._make_batch_create_chunk_request(chunks)
         response = client.batch_create_chunks(request)
         return [decode_chunk(chunk) for chunk in response.chunks]
 
@@ -680,63 +665,7 @@ class Document(abc.ABC):
         if client is None:
             client = get_default_retriever_async_client()
 
-        if isinstance(chunks, glm.BatchCreateChunksRequest):
-            response = await client.batch_create_chunks(chunks)
-            response = type(response).to_dict(response)
-            return response
-
-        _requests = []
-        name, data, custom_metadata = None, None, None
-        if isinstance(chunks, Iterable):
-            for chunk in chunks:
-                if isinstance(chunk, glm.CreateChunkRequest):
-                    _requests.append(chunk)
-                elif isinstance(chunk, str):
-                    c = glm.CreateChunkRequest(
-                        parent=self.name, chunk=glm.Chunk(data={"string_value": chunk})
-                    )
-                    _requests.append(c)
-                elif isinstance(chunk, Mapping):
-                    for key, value in chunk.items():
-                        if re.match(_CHUNK_NAME_REGEX, value):
-                            name = value
-                        elif isinstance(value, str):
-                            data = chunk[key]
-                        elif isinstance(value, Iterable):
-                            custom_metadata = value
-                        c = glm.CreateChunkRequest(  # Create a glm.CreateChunkRequest
-                            parent=self.name,
-                            chunk=glm.Chunk(
-                                name=name,
-                                data={"string_value": data},
-                                custom_metadata=custom_metadata,
-                            ),
-                        )
-                        _requests.append(c)
-                elif isinstance(chunk, tuple):
-                    for item in chunk:
-                        if re.match(_CHUNK_NAME_REGEX, item):
-                            name = item
-                        elif isinstance(item, str):
-                            data = item
-                        elif isinstance(item, Iterable):
-                            custom_metadata = item
-                        c = glm.CreateChunkRequest(  # Create a glm.CreateChunkRequest
-                            parent=self.name,
-                            chunk=glm.Chunk(
-                                name=name,
-                                data={"string_value": data},
-                                custom_metadata=custom_metadata,
-                            ),
-                        )
-
-                else:
-                    raise TypeError(
-                        "Batched chunk requests must be in the format of a dictionary or tuple,"
-                        "with the name as the key and the data as the value."
-                    )
-
-        request = glm.BatchCreateChunksRequest(parent=self.name, requests=_requests)
+        request = self._make_batch_create_chunk_request(chunks)
         response = await client.batch_create_chunks(request)
         return [decode_chunk(chunk) for chunk in response.chunks]
 
@@ -814,7 +743,7 @@ class Document(abc.ABC):
         metadata_filters: Optional[list[str]] = None,
         results_count: Optional[int] = None,
         client: glm.RetrieverServiceClient | None = None,
-    ):
+    ) -> list[RelevantChunk]:
         """
         Query a `Document` in the `Corpus` for information.
 
@@ -842,7 +771,15 @@ class Document(abc.ABC):
         response = client.query_document(request)
         response = type(response).to_dict(response)
 
-        return response
+        # Create a RelevantChunk object for each chunk listed in response['relevant_chunks']
+        relevant_chunks = []
+        for c in response["relevant_chunks"]:
+            rc = RelevantChunk(
+                chunk_relevance_score=c["chunk_relevance_score"], chunk=Chunk(**c["chunk"])
+            )
+            relevant_chunks.append(rc)
+
+        return relevant_chunks
 
     async def query_async(
         self,
@@ -850,7 +787,7 @@ class Document(abc.ABC):
         metadata_filters: Optional[list[str]] = None,
         results_count: Optional[int] = None,
         client: glm.RetrieverServiceAsyncClient | None = None,
-    ):
+    ) -> list[RelevantChunk]:
         """This is the async version of `Document.query`."""
         if client is None:
             client = get_default_retriever_async_client()
@@ -868,7 +805,15 @@ class Document(abc.ABC):
         response = await client.query_document(request)
         response = type(response).to_dict(response)
 
-        return response
+        # Create a RelevantChunk object for each chunk listed in response['relevant_chunks']
+        relevant_chunks = []
+        for c in response["relevant_chunks"]:
+            rc = RelevantChunk(
+                chunk_relevance_score=c["chunk_relevance_score"], chunk=Chunk(**c["chunk"])
+            )
+            relevant_chunks.append(rc)
+
+        return relevant_chunks
 
     def _apply_update(self, path, value):
         parts = path.split(".")
@@ -1133,6 +1078,13 @@ def decode_chunk(chunk: glm.Chunk) -> Chunk:
 
 
 @string_utils.prettyprint
+@dataclasses.dataclass
+class RelevantChunk:
+    chunk_relevance_score: float
+    chunk: Chunk
+
+
+@string_utils.prettyprint
 @dataclasses.dataclass(init=False)
 class Chunk(abc.ABC):
     """
@@ -1152,8 +1104,8 @@ class Chunk(abc.ABC):
         data: ChunkData | str,
         custom_metadata: list[CustomMetadata] | None,
         state: State,
-        create_time: datetime.datetime,
-        update_time: datetime.datetime,
+        create_time: datetime.datetime | str,
+        update_time: datetime.datetime | str,
     ):
         self.name = name
         if isinstance(data, str):
@@ -1165,8 +1117,14 @@ class Chunk(abc.ABC):
         else:
             self.custom_metadata = [CustomMetadata(*cm) for cm in custom_metadata]
         self.state = state
-        self.create_time = create_time
-        self.update_time = update_time
+        if isinstance(create_time, datetime.datetime):
+            self.create_time = create_time
+        else:
+            self.create_time = datetime.datetime.strptime(create_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+        if isinstance(update_time, datetime.datetime):
+            self.update_time = update_time
+        else:
+            self.update_time = datetime.datetime.strptime(update_time, "%Y-%m-%dT%H:%M:%S.%fZ")
 
     def _apply_update(self, path, value):
         parts = path.split(".")
